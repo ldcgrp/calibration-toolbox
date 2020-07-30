@@ -14,10 +14,60 @@
 %     You should have received a copy of the GNU General Public License
 %     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 %--------------------------------------------------------------------------
+%
+% method list:
+%   public:
+%         function obj = CameraCalibrationBase(width, height, pattern, errR)
+%           constructtor
+%
+%         function obj = save(obj, name)
+%         function obj = load(obj, name)
+%           save and load object settings : only update settings will not
+%           reconstruct obj
+%
+%         function obj = setIntrinsics(obj, fileName)
+%            update "intrinsicsFile" property         
+%
+%         function [photoIndex, valid] = addPhoto(obj, photo)
+%           add a photo and try to matching features with the pattern stored in teh object.         
+%   
+%         function obj = calibrate(obj)
+%           call initializeCalibration() & optimizeCalibration();
+%
+%         function obj = setPoseVector(obj, p, photoIndex)
+%           separate vector P to obj.photosInfo(photoIndex).rvec and
+%           obj.photosInfo(photoIndex).tvec, photoIndex can be an N vector,
+%           where p should be a (6xN) length single row vector. 
+%           If photoIndex is empty, do full range assignment: P contains all vector for all photos in
+%           Obj. p(i:i+2)=obj.photosInfo(i).rvec,and p(i+3:i+5)=obj.photosInfo(i).tvec]
+%
+%         function p = getPoseVector(obj, photoIndex)
+%           reversed of se PosseVector method
+%
+%         function [error, jacobPose, jacobCamera] = computeReprojError(obj, photoIndex)
+%           request rvec and tvec filled before calling
+%         function showPoints(obj)
+%         function plotPatternBound(obj, photoIndex)
+%         function render = reprojectPattern(obj, photoIndex)
+%   protected:
+%         function obj = initializeCalibration(obj)
+%         function obj = optimizeCalibration(obj)
+%         function [error, jacobCameraPose] = calibrationObjective(obj, p)
+%         function error = pnpOptimization(obj, photoIndex)
+%         function [error, jacobPose] = pnpObjective(obj, photoIndex, p)
+
+
+
+
+% Modified by Joe Zhong 24july2020:
+%       replace hard coded Setting "20/1000" with property: "mErrRatio=0.02"
+
 classdef CameraCalibrationBase < handle & matlab.mixin.Heterogeneous
     properties
         
         % Settings
+        mErrRatio;
+        
         minMatchedPoints; 
         maxInitReprojectError; 
         maxInlierError
@@ -38,16 +88,22 @@ classdef CameraCalibrationBase < handle & matlab.mixin.Heterogeneous
     
     methods(Access = public)
         % 
-        function obj = CameraCalibrationBase(width, height, pattern) 
+        function obj = CameraCalibrationBase(width, height, pattern, errR)
+            if exist('errR','var')
+                obj.mErrRatio = errR;
+            else
+                obj.mErrRatio=0.02;
+            end
             obj.pattern = pattern; 
             obj.photosInfo = []; 
             obj.camera = []; 
             
-            obj.minMatchedPoints = max(15, 20 / 1000 * width); 
-            obj.maxInitReprojectError = 20 / 1200 * width; 
+            refDim=min(width,height);
+            obj.minMatchedPoints = max(15, round(obj.mErrRatio * width)); 
+            obj.maxInitReprojectError = obj.mErrRatio * refDim; 
             obj.maxFinalReprojectError = 1.5; 
             obj.maxInlierError = 1; 
-            obj.maxSmoothError = 80 / 1000 * width; 
+            obj.maxSmoothError = round((1-obj.mErrRatio) * refDim); 
             
             obj.intrinsicsFile = []; 
 
@@ -212,41 +268,66 @@ classdef CameraCalibrationBase < handle & matlab.mixin.Heterogeneous
 
         %
         function obj = setPoseVector(obj, p, photoIndex)
-            if isempty(photoIndex)
-                photosValid = find([obj.photosInfo(:).valid]);
-                for k = 1:numel(photosValid)
-                    i = photosValid(k);
-                    rvec = p((k - 1) * 6 + (1:3));
-                    tvec = p((k - 1) * 6 + (4:6));
-                    obj.photosInfo(i).rvec = rvec;
-                    obj.photosInfo(i).tvec = tvec(:);
-                end
-            else
-                rvec = p(1:3);
-                tvec = p(4:6);
-                obj.photosInfo(photoIndex).rvec = rvec;
-                obj.photosInfo(photoIndex).tvec = tvec(:);
-            end
+            %  modify by Joe zhong 27July:
+            %   support multi length photoIndex 
+            %   each 6 elements of P co-responding to one element in PhotoIndex
+            %%
+            %original code
+            %             if isempty(photoIndex)
+            %                 photosValid = find([obj.photosInfo(:).valid]);
+            %                 for k = 1:numel(photosValid)
+            %                     i = photosValid(k);
+            %                     rvec = p((k - 1) * 6 + (1:3));
+            %                     tvec = p((k - 1) * 6 + (4:6));
+            %                     obj.photosInfo(i).rvec = rvec;
+            %                     obj.photosInfo(i).tvec = tvec(:);
+            %                 end
+            %             else
+            %                 rvec = p(1:3);
+            %                 tvec = p(4:6);
+            %                 obj.photosInfo(photoIndex).rvec = rvec;
+            %                 obj.photosInfo(photoIndex).tvec = tvec(:);
+            %             end
+
+            %%
+            % test for back ward compatible:
+        try
+            m=length(photoIndex);
+        catch
+            m=0;
         end
+        if m=0
+            photoIndex=find([obj.photosInfo(:).valid]);
+            m=length(photoIndex);
+        end
+        p=reshape(p,6,m);
+        for i=1:m
+            obj.photosInfo(photoIndex(i)).rvec =p(1:3,i)' ;
+            obj.photosInfo(photoIndex(i)).tvec = p(4:6,i)';
+        end           
+       end
         
         % 
         function p = getPoseVector(obj, photoIndex)
-            if isempty(photoIndex)
-                photosValid = find([obj.photosInfo(:).valid]); 
-                p = []; 
-                for k = 1:numel(photosValid)
-                    i = photosValid(k); 
-                    rvec = obj.photosInfo(i).rvec; 
-                    tvec = obj.photosInfo(i).tvec; 
-                    p = [p; rvec(:); tvec(:)]; 
-                end
-            else
-                rvec = obj.photosInfo(photoIndex).rvec;
-                tvec = obj.photosInfo(photoIndex).tvec;
-                p = [rvec(:); tvec(:)]; 
+        %  modify by Joe zhong 27July:
+        %   support multi length photoIndex 
+        %   each 6 elements of P co-responding to one element in PhotoIndex           
+            try
+                m=length(photoIndex);
+            catch
+                m=0;
             end
+            if m=0
+                photoIndex=find([obj.photosInfo(:).valid]);
+                m=length(photoIndex);
+            end
+            for i=1:m
+                p(1:3,i)=(obj.photosInfo(photoIndex(i)).rvec)' ;
+                p(4:6,i)=(obj.photosInfo(photoIndex(i)).tvec)';
+            end
+            p=reshape(p,1,numel(p));
         end
-        
+
         % 
         function [error, jacobPose, jacobCamera] = computeReprojError(obj, photoIndex)
             rvec = obj.photosInfo(photoIndex).rvec; 
